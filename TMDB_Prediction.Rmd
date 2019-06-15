@@ -1,0 +1,324 @@
+---
+title: "TMDB Box Office Prediction"
+author: "Janice Li"
+date: "4/29/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+## Project Introduction
+
+When we think of a movie that earns top box office revenue, we often find these elements in it: all-star casts, renowned director, popular franchise, etc. However, there has never been a concrete answer about how much each of these elements affects movies' revenue. This project, TMDB Box Office Revenue Prediction, intends to investigate this question through explanatory data analysis and build machine learning models to predict movies' revenue according to their features.
+
+
+##### Data Overview
+
+```{r}
+data=read.csv("/Users/janiceli/Downloads/train.csv")
+dim(data)
+```
+
+## Data Cleaning and Feature Engineering
+
+The dataset contains records of 3000 movies from The Movie Database(TMDB) and embodies 23 variables, including the one we aim to predict, revenue. As the first step of data cleaning, I got rid of features that obvious do not relate with the response variable: id, homepage(hmtl),imdb_id and poster_path(html). Some features may be investigated with advanced NLP methods, like title/original_title, overview and tagline, but those are beyond the scope of this project. Therefore, I deleted those variables, too.
+
+```{r}
+data=data[,c(2:4,7,10,12:17,20:23)]
+colnames(data)
+```
+
+We will clean and adjust these variables one by one.
+
+
+
+### Belongs_to_collection
+
+This veriable indicates whether the movie belongs to a specific collection/franchise. As you see above, the data was stored as python dictionaries with lots of irrelevant information. I used functions in "stringr" library to extract the collection names and save them as a variable "Collection_Name". Furthermore, the fact that a movie belongs to a series might also be useful information. Thus I created a boolean varaible "Has_Collection" to indicate whether the movie is part of any franchise.
+
+```{r}
+library("stringr")
+data$Collection_Name=str_extract_all(data$belongs_to_collection,"(?<=name\\'\\:\\s{1}\\').+(?=\\'\\,\\s{1}\\'poster)")
+data$Collection_Name[data$Collection_Name=="character(0)"]=NA
+data$Has_Collection=!is.na(data$Collection_Name)
+data$Collection_Name=sub(" Collection","",data$Collection_Name)
+data$Collection_Name=unlist(data$Collection_Name)
+```
+
+Unfortunately, I cannot use "Collection_Name" as model inputs since it contains too many category levels for the machine to learn. Alternatively, I created a variable, "belongs_to_popular_collection", to reflect whether the collection is one of the 117 most popular franchises that earned the most average box office revenue. The list of popular franchises was scraped from https://www.the-numbers.com/movies/franchises. All the rankings are supported by worldwide box office record.
+
+```{r}
+Popular_Collection_List=c('Marvel Cinematic Universe','Star Wars',"J.K. Rowling's Wizarding World",'Avengers','Disney Live Action Reimaginings','Batman','Harry Potter','X-Men','James Bond','Spider-Man','DC Extended Universe','Wonder Woman','Middle Earth','Jurassic Park','Transformers','The Fast and the Furious','Pirates of the Caribbean','The Hunger Games','Shrek','Star Trek','Twilight','Despicable Me','The Dark Knight Trilogy','Mission: Impossible','Superman','The Lord of the Rings','Iron Man','Indiana Jones','Toy Story','The Incredibles','Captain America','Finding Nemo','The Hobbit','Bourne','Planet of the Apes','Ice Age','Avatar','Star Wars Anthology','Guardians of the Galaxy','Thor','Deadpool','Madagascar','Alvin and the Chipmunks','The Hangover','Men in Black','Terminator','LEGO','Fockers','The Matrix','Alien','Cars','Teenage Mutant Ninja Turtles','Madea',"Ocean's 11",'How to Train Your Dragon','The Mummy','The Conjuring','Night at the Museum','Wolverine','The Chronicles of Narnia','Planet of the Apes (2011-2017)','Monsters, Inc.','Kung Fu Panda','Rush Hour','Die Hard','Jack Ryan','Home Alone','Lethal Weapon','Hotel Transylvania','Austin Powers','Ghostbusters','Halloween','Scary Movie','Saw','King Kong','Beverly Hills Cop','The Karate Kid','Hannibal Lecter','Back to the Future','Alice in Wonderland','Independence Day','American Pie','Jumanji','Jaws','Paranormal Activity','Frozen','Ant-Man','Sherlock Holmes','Fantastic Beasts','National Treasure','Wreck-It Ralph','Robert Langdon','Fifty Shades','Friday the 13th','Taken','Nightmare on Elm Street','Godzilla and Kong Universe','The Santa Clause','The Secret Life of Pets','Jackass','Pitch Perfect Trilogy','Godzilla','Spy Kids','Divergent','Unbreakable','Fantastic Four','The Muppets','Minions','Aquaman','Scream','Jump Street','It','300','Predator','Crocodile Dundee','My Big Fat Greek Wedding','Ted')
+
+
+data$belongs_to_popular_collection=data$Collection_Name %in% Popular_Collection_List
+```
+
+
+Take a look at the 3 new variables:
+
+```{r}
+head(data[,16:18],5)
+```
+
+We see that whether a movie belongs to franchise significantly affects box office revenue. Moreover, whether it belongs to a popular franchise shows even more apparent correlation.
+```{r}
+par(mfrow=c(1:2))
+boxplot(data$revenue~data$Has_Collection,ylim=c(0,1000000000),main="Revenue ~ Has_Collection",ylab="Revenue")
+boxplot(data$revenue~data$belongs_to_popular_collection,ylim=c(0,1000000000),main="Revenue ~ Popular Collection",ylab="Revenue")
+```
+
+
+### Genres
+
+Similar with "belongs_to_collection", "Genres" is also saved as python dictionary format and mingled with irrelevant information. What makes to task more difficult is the fact that movies can have multiple genres, and I cannot store them all in a single variable. To solve this, I decided to create a sparse matrix with genre names being the column names and store boolean values in it to show whether a movie belongs to each genre. I also created a new variable "Genre_Count" to store the number of genres that the movies belong to since it might also be meaningful information.
+
+```{r}
+data$Genre_Count=str_count(data$genres,"\\{")
+Genres=as.data.frame(str_split_fixed(data$genres,"\\}\\,\\s\\{",data$Genre_Count),stringsAsFactors = FALSE)
+Genres_2 <- as.data.frame(sapply(Genres, function(x) str_extract(x, "(?<=name\\'\\:\\s{1}\\').+(?=\\')")), stringsAsFactors = F)
+```
+
+
+```{r}
+head(Genres_2)
+```
+
+```{r}
+library("dplyr")
+Genre_Titles=c("Action","Adventure","Animation","Comedy","Crime","Documentary","Drama","Family","Fantasy","Foreign","History","Horror","Music","Mystery","Romance","Science_Fiction","Thriller","TV_Movie","War","Western")
+Genres_3=data.frame(matrix(nrow=0,ncol=length(Genre_Titles)))
+colnames(Genres_3)=Genre_Titles
+for (i in 1:length(Genre_Titles)) {
+  for (j in 1:nrow(Genres_2)) {
+      Genres_3[j,i]=Genre_Titles[i] %in% Genres_2[j,]
+  }
+}
+data=cbind(data,as.data.frame(Genres_3))
+```
+
+This is how the sparse matrix looks like. I combined it with "data" to make the 17 genre names new features.
+
+```{r}
+head(Genres_3,5)
+```
+
+Taking "Adventure" as an example. We see that genres are significant indicators of the films' box office revenue.
+
+```{r}
+boxplot(data$revenue~data$Action,ylim=c(0,200000000),main="Revenue ~ Action Genre",ylab="Revenue")
+```
+
+
+### Production Companies
+
+The same data cleaning method was applied to "production_companies". I extracted the company names and map them to the list of top 100 entertainment companies that earned top average box office revenue. The list was scraped from https://www.the-numbers.com/movies/production-companies/. Notice that though some movies were made by multiple companies, I only extracted the first one mentioned, which reasonably plays a major role in production. I cannot make sparse matrix for this variable as I did for "genres", since the abundance of companies in the data could hugely raise the number of columns and causes dimenality problems. Also, some research in the film industry told me that production companies do not influence audiences's decision too much, so it should be enough to only consider the major company.
+
+```{r}
+data$Company=str_extract_all(data$production_companies,"(?<=name\\'\\:\\s{1}\\').+(?=\\'\\,\\s{1}\\'id)")
+data$Company=gsub("'.*","",data$Company)
+data$Company[data$Company=="character(0)"]=NA
+```
+
+```{r}
+Popular_Company_List=c('Warner Bros.','Universal Pictures','Columbia Pictures','Walt Disney Pictures','Marvel Studios','Paramount Pictures','20th Century Fox','Dune Entertainment','Legendary Pictures','Relativity Media','DreamWorks Animation','Amblin Entertainment','DreamWorks Pictures','New Line Cinema','Disney-Pixar','Regency Enterprises','Village Roadshow Productions','Metro-Goldwyn-Mayer Pictures','Heyday Films','Lucasfilm','RatPac Entertainment','Walt Disney Animation Studios','Lionsgate','Summit Entertainment','Touchstone Pictures','di Bonaventura Pictures','Working Title Films','Jerry Bruckheimer','Original Film','Eon Productions','Wingnut Films','Illumination Entertainment','1492 Pictures','TSG Entertainment','Bad Robot','The Kennedy/Marshall Company','Fox 2000 Pictures','Skydance Productions','Imagine Entertainment','Twentieth Century Fox','Perfect World Pictures','Temple Hill Entertainment','Ingenious Film Partners','Hasbro Studios','Blue Sky Studios','PDI','Syncopy','One Race Films','Sony Pictures Animation','Donners’ Company','Canal Plus','Atlas Entertainment','Silver Pictures','Spyglass Entertainment','Blumhouse','Ingenious Media','New Regency','Scott Free Films','Chernin Entertainment','Dentsu Inc.','Walden Media','SunsweptEntertainment','Cruel and Unusual Films','Happy Madison','Zancuk Company','Davis Entertainment','LStar Capital','Scott Rudin Productions','StudioCanal','Tri-Star Pictures','Centropolis Entertainment','Overbrook Entertainment','GK Films','Kinberg Genre','Color Force','Brian Grazer Productions','Roth Films','Chris Meledandri','Mandeville Films','Screen Gems','The Safran Company','Revolution Studios','Participant Media','Castle Rock Entertainment','Weinstein Company','Cruise-Wagner','Lightstorm Entertainment','Fox Searchlight Pictures','United Artists','Plan B Entertainment','China Film Company','Bad Hat Harry Productions','Laura Ziskin Productions','Focus Features','20th Century Fox Animation','Parkes+Macdonald Productions','Vertigo Entertainment','Fairview Entertainment','Wanda Media','EuropaCorp')
+data$belongs_to_popular_company=data$Company %in% Popular_Company_List
+```
+
+```{r}
+head(data[,39:40])
+```
+
+We see that the variable "belongs_to_popular_company" does explain some variance in revenue.
+```{r}
+boxplot(data$revenue~data$belongs_to_popular_company,ylim=c(0,500000000),main="Revenue ~ Produced by Popular Companies",ylab="Revenue")
+```
+
+
+### Cast
+
+Cast is argubly one of the most influencial elements to suggest film popularity. To leverage this indicator, I created two variables, "Cast_Count" and "Popular_Cast_Count". The former is simply the number of casts that acted in the movie, and the latter shows how many of them are among the top 1000 actors/actresses, ranked by the total amount of worldwide revenue generated by all the movies a star has appeared in over their lifetime. The data source is https://www.the-numbers.com/box-office-star-records/worldwide/lifetime-acting/top-grossing-stars.
+
+```{r}
+data$Cast_Count=str_count(data$cast,"\\{")
+Casts=as.data.frame(str_split_fixed(data$cast,"\\}\\,\\s\\{",data$Cast_Count),stringsAsFactors = FALSE)
+Casts_2 <- as.data.frame(sapply(Casts, function(x) str_extract(x, "(?<=name\\'\\:\\s{1}\\').+(?=\\')")), stringsAsFactors = F)
+Casts_3 <- as.data.frame(sapply(Casts_2, function(x) sub("\'.*","",x)), stringsAsFactors = F)
+```
+
+```{r}
+Popular_Cast_List=read.csv("/Users/janiceli/Desktop/cast.csv")
+Casts_4=Casts_3
+for (i in 1:dim(Casts_3)[2]) {
+  Casts_4[,i]=tolower(Casts_3[,i]) %in% tolower(Popular_Cast_List$Cast.Name)
+}
+data$Popular_Cast_Count=rowSums(Casts_4)
+```
+
+
+We see that nearly 1/3 of movies do not have any "popular casts", while another 1/3 have 2-3 "popular casts". The rest films have more than 3 "popular casts" participating.
+
+```{r}
+table(data$Popular_Cast_Count)
+```
+
+We plot "Popular_Cast_Count" V.S. "Revenue". Though it is not clear, we do see a positive correlation between the two variables.
+
+```{r}
+plot(data$Popular_Cast_Count,data$revenue,main="Revenue ~ Count of Popular Casts")
+```
+
+### Production Country
+
+I created a variable "belongs_to_country_list" to store whether the movie is produced in one of the 19 countries that earned the most revenue per movie. The list was scraped from https://www.the-numbers.com/movies/production-countries/#tab=territory.
+```{r}
+production_countries=str_extract_all(data$production_countries,"(?<=name\\'\\:\\s{1}\\').+(?=\\')")
+data$Country=gsub("\'.*","",production_countries)
+data$Country[data$Country=="character(0)"]=NA
+Popular_Country_List=c('United States of America','United Kingdom','China','France','Japan','Germany','New Zealand','Australia','South Korea','Canada','India','Hong Kong','Italy','Spain','Russia','Belgium','Mexico','Sweden','Netherlands')
+data$belongs_to_country_list=data$Country %in% Popular_Country_List
+```
+
+The correlation is significant.
+
+```{r}
+boxplot(data$revenue~data$belongs_to_country_list,ylim=c(0,200000000),main="Revenue ~ Produced in Countries that Earn Top Box Office",ylab="Revenue")
+```
+
+
+### Released Date
+
+Released dates reasonably plays a part in deciding a movie's box office revenue since audiences' buying power and appreciation of cinematic arts have been changing over time. So I converted it into a continuous variable.
+
+```{r}
+data$release_date=as.character(data$release_date)
+data$release_date=as.Date(data$release_date,format="%m/%d/%y")
+```
+
+```{r}
+plot(data$release_date,data$revenue,main="Revenue ~ Count of Popular Casts")
+```
+
+We do see a corelation between movie released date and revenue. However, how come that some movies have released dates in the future? I suppose those are either data entry error or unproved prediction. Let's dig into these movies that are released in the future:
+
+```{r}
+Future_Movie=data[which(data$release_date>as.Date("01/01/2019",format="%m/%d/%y")),]
+dim(Future_Movie)
+```
+Since there are only have 146 data points that have abnormal released dates, I believe that deleting them would not cause much information loss, so I did it.
+
+```{r}
+data=data[-which(data$release_date>as.Date("01/01/2019",format="%m/%d/%y")),]
+plot(data$release_date,data$revenue,main="Revenue ~ Count of Popular Casts")
+```
+
+### Keyword
+
+To handle the Keyword variable, I created two variables "Keyword_Count" and "Popular_Keyword_Count". The first shows the number of keywords that the movie contains, while the second shows the number of "popular keywords". The list of 1000 "Popular keywords" was scraped from https://www.the-numbers.com/.
+```{r}
+keywords_list=read.csv("/Users/janiceli/Desktop/Popular Keywords.csv")
+data$Keyword_Count=str_count(data$Keywords,"\\{")
+Keywords=as.data.frame(str_split_fixed(data$Keywords,"\\}\\,\\s\\{",data$Keyword_Count),stringsAsFactors = FALSE)
+```
+
+```{r}
+Keywords_2 <- as.data.frame(sapply(Keywords, function(x) str_extract(x, "(?<=name\\'\\:\\s{1}\\').+(?=\\')")), stringsAsFactors = F)
+Keywords_3=Keywords_2
+for (i in 1:dim(Keywords_3)[2]) {
+  Keywords_3[,i]=tolower(Keywords_2[,i]) %in% tolower(keywords_list$Keyword)
+}
+data$Popular_Keyword_Count=rowSums(Keywords_3)
+```
+
+```{r}
+#Distribution of Popular_Keyword_Count
+table(data$Popular_Keyword_Count)
+boxplot(data$revenue~data$Popular_Keyword_Count,main="Revenue ~ Count of Popular Casts",ylim=c(0,500000000))
+```
+
+There is an linear-like correlation between the variables, though the relationship becomes weak as the number of popular keywords rises.
+
+
+
+### Crew
+
+The "crew" variable contains hundreds of participates of each movie production. Since that is too much information to decipher, I only extracted the directors' names, and mapped them to the top 100 average box office director list. The data source is https://www.the-numbers.com/box-office-star-records/worldwide/lifetime-specific-technical-role/director.
+```{r}
+data$Director=str_extract_all(data$crew,"(?<=\\'Director\\', \\'name\\'\\:\\s{1}\\').+(?=\\')")
+data$Director=gsub("'.*","",data$Director)
+Popular_Director_List=c('Steven Spielberg','Joe Russo','Anthony Russo','Peter Jackson','Michael Bay','James Cameron','David Yates','Christopher Nolan','Tim Burton','Robert Zemeckis','Ron Howard','Ridley Scott','Chris Columbus','Roland Emmerich','Pierre Coffin','Bryan Singer','Gore Verbinski','James Wan','J.J. Abrams','George Lucas','Brad Bird','Francis Lawrence','Sam Raimi','Clint Eastwood','Zack Snyder','Carlos Saldanha','M. Night Shyamalan','Bill Condon','Joss Whedon','Andrew Stanton','Chris Renaud','Tom McGrath','Sam Mendes','Jon Favreau','Andrew Adamson','John Lasseter','Eric Darnell','Barry Sonnenfeld','Shawn Levy','Justin Lin','Steven Soderbergh','Jon Turteltaub','Conrad Vernon','Kyle Balda','Brett Ratner','Martin Scorsese','Pete Docter','Rob Marshall','David Fincher','Tony Scott','Todd Phillips','Andy Wachowski','Rich Moore','Martin Campbell','Rob Minkoff','F. Gary Gray','Byron Howard','Richard Donner','Lee Unkrich','Raja Gosnell','Wolfgang Petersen','Ivan Reitman','Dennis Dugan','James Mangold','Mike Newell','Garry Marshall','Ron Clements','Jay Roach','Joe Johnston','John Musker','Mike Mitchell','Peyton Reed','Christopher McQuarrie','James Gunn','Guy Ritchie','Joel Schumacher','Alfonso Cuarón','Colin Trevorrow','Kenneth Branagh','Dean DeBlois','Marc Forster','Rob Letterman','Quentin Tarantino','Robert Rodriguez','Gareth Edwards','Peter Berg','Tom Shadyac','Paul Greengrass','Marc Webb','Ryan Coogler','Stephen Sommers','Ang Lee','Peter Farrelly','Juan Antonio Bayona','Chris Weitz','Rian Johnson','Doug Liman','Kelly Asbury','Shane Black')
+data$directed_by_famous_director=data$Director %in% Popular_Director_List
+```
+
+
+```{r}
+boxplot(data$revenue~data$directed_by_famous_director,main="Revenue ~ Directed by Popular Directors",ylim=c(0,500000000))
+```
+
+
+
+## Data Modeling
+```{r}
+names(data)
+```
+
+Establish the training dataset by extracting the meaning variables from our original data, most of which are those I created.
+```{r}
+train=data[,c(2,5,8,9,15,17,18:39,41:43,45:47,49)]
+train[which(is.na(train$runtime)),"runtime"]=median(train$runtime,na.rm = T)
+names(train)
+summary(train)
+```
+
+The data looks nice and clean with no missing value(I imputed 2 NAs of "runtime").
+
+
+I firstly fitted a random forest model to the data.
+```{r}
+library(randomForest)
+model1=randomForest(formula=revenue~.,data=train,na.action = na.omit)
+plot(model1)
+model1
+```
+
+The RMSE value is very large considering revenue can be easily of million or billion units. However, the model is able to explain 74.38% of variance, which is quite remarkable given the vagueness of our raw data.
+To remediate the effect of large revenue numbers, I used log and scale functions:
+
+```{r}
+model2=randomForest(formula=log(revenue)~.,data=train,na.action = na.omit)
+plot(model2)
+model2
+```
+
+```{r}
+model3=randomForest(formula=scale(revenue)~.,data=train,na.action = na.omit)
+plot(model3)
+model3
+```
+
+Secondly, I fitted xgboost model to the data. However, the model tends to produce extreme values like negative revenue, which do not make sense.
+```{r}
+library("xgboost")
+model3=xgboost(data=as.matrix(train[,-3]),label = train$revenue,nrounds = 100,objective="reg:linear")
+```
+
+
+
+#### Summary
+
+While working on this project, I performed a lot of data cleaning and feature engineering. Most of the variables I used for modeling are those I created with the help of external data. Therefore, I gained the understanding that these messy and tedious tasks are often the essential parts of data mining. I also learned a lot about the film industry, including its revenue indicators and marketing strategies.
+
+As the ultimate result, I built a random forest model that explains 74.38% of the data variance with RMSE of 0.256(scaled data).
+
+#### Areas that can be improved
+
+1. There could be better use of external data when I map it to the raw data. For instance, I could have weigh some features like casts and directors according to the average box office revenue they are affliated to, instead of just setting boolean value of whether they are "popular". In this way, I can transform some boolean values into numeric ones that indicate more linear correlations with revenue.
+
+2. I only tried random forest and xgboost when fitting model, while there are a lot of other machine learning methods. Also, I should spend more time training the model and optimize the parameters.
+
+3. As I mentioned at the begining, some advance NPL methods may be adopted to analyze movies' titles, overviews and taglines. However, since I am not an expert in the realm(currently), this part will be saved for future exploration.
+
